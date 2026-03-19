@@ -1,0 +1,19 @@
+{
+  // 1. 指定默认 Python 解释器（新版本推荐）
+  "python.defaultInterpreterPath": "/Users/chris/miniconda3/envs/cv_env/bin/python",
+  // 2. 强制终端激活环境（关键：增加这条兜底配置）
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "python.terminal.activateEnvironment": true,
+  // 3. 终端配置（确保以登录 shell 启动，加载 Conda 配置）
+  "terminal.integrated.profiles.osx": {
+    "zsh": {
+      "path": "/bin/zsh", // 改用绝对路径，避免找不到 zsh
+      "args": ["--login"]
+    }
+  },
+  "terminal.integrated.defaultProfile.osx": "zsh",
+  // 4. 禁用终端自动激活 base 环境（避免冲突）
+  "terminal.integrated.env.osx": {
+    "CONDA_AUTO_ACTIVATE_BASE": "false"
+  }
+}
