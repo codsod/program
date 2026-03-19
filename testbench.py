@@ -154,13 +154,28 @@ def simulate_photonic_inference(model, dataloader, num_runs=None):
     fc_weight = model.fc1.weight.detach().cpu()
     fc_bias = model.fc1.bias.detach().cpu()
 
-    # 理论参数 (基于论文 Fig 5e 和正文)
-    # 论文提到调制速度可达 GHz 级别，这里假设单次 MVM 的光传播+探测时间为 100 ps (0.1 ns)
-    # 注意：这是物理极限模拟，不是 CPU 运行时间
-    t_light_per_mvm = 100e-12  # 100 picoseconds
+    # 理论延迟模型（可按器件参数调整）
+    # 说明：按你的要求，光学路径不再只算 MVM，而是补上后续电学步骤延迟。
+    timing_model = {
+        # 光学 MVM（卷积）延迟
+        "t_mvm_optical_conv": 100e-12,  # 100 ps
+        # 后续电学链路延迟（示例假设值）
+        "t_elec_nonlinearity": 1.0e-9,  # ReLU 等非线性
+        "t_elec_fc": 5.0e-9,  # 全连接
+        "t_elec_softmax_argmax": 1.0e-9,  # Softmax + 判决
+        "t_elec_verify_target": 1.0e-9,  # 与 target 对比
+    }
+
+    latency_per_sample_mvm_only = timing_model["t_mvm_optical_conv"]
+    latency_per_sample_hybrid = (
+        timing_model["t_mvm_optical_conv"] +
+        timing_model["t_elec_nonlinearity"] + timing_model["t_elec_fc"] +
+        timing_model["t_elec_softmax_argmax"] +
+        timing_model["t_elec_verify_target"])
 
     total_images = 0
     start_time = time.perf_counter()
+    electronic_elapsed = 0.0
 
     # 正确性验证统计
     conv_max_abs_err = 0.0
@@ -189,18 +204,20 @@ def simulate_photonic_inference(model, dataloader, num_runs=None):
             mvm_conv_relu, mvm_output = photonic_mvm_forward(
                 data, conv_weight, conv_bias, fc_weight, fc_bias)
 
-            # 真实物理过程模拟：
-            # 光脉冲进入 -> 穿过 PCM 矩阵 (卷积) -> 探测器 -> ReLU (电) -> 穿过 PCM 矩阵 (FC) -> 探测器
-            # 假设整个链路 (Conv + ReLU + FC) 的光传播延迟约为 200ps (极快)
-            latency_per_sample = 200e-12
-
-            # 累加理论光子耗时 (注意：这不是 CPU 跑代码的时间，而是理论物理时间)
+            # 累加样本数
             total_images += b
 
-            # 2) PyTorch 基准前向
+            # 2) PyTorch 基准前向（电学路径时间：前向 + 与target对比）
             data_device = data.to(device)
+            t_elec_start = time.perf_counter()
+            output_pytorch = model(data_device)
+            pytorch_pred = output_pytorch.argmax(dim=1)
+            pytorch_correct_vs_target += (pytorch_pred == target.to(device)).sum().item()
+            electronic_elapsed += time.perf_counter() - t_elec_start
+
+            # 下述为正确性验证开销，不计入电学前向基准时间
             ref_conv_relu = model.relu(model.conv1(data_device)).cpu()
-            output_pytorch = model(data_device).cpu()
+            output_pytorch = output_pytorch.cpu()
 
             # 3) 误差统计（验证 MVM 正确性）
             conv_abs_err = (mvm_conv_relu - ref_conv_relu).abs()
@@ -219,13 +236,14 @@ def simulate_photonic_inference(model, dataloader, num_runs=None):
 
             pred_match += (mvm_pred == pytorch_pred).sum().item()
             mvm_correct_vs_target += (mvm_pred == target).sum().item()
-            pytorch_correct_vs_target += (pytorch_pred == target).sum().item()
 
     end_time = time.perf_counter()
-    cpu_elapsed = end_time - start_time
+    wall_elapsed = end_time - start_time
 
     # 计算理论光子耗时
-    theoretical_photonic_time = total_images * latency_per_sample
+    # 新口径：光学 MVM + 后续电学步骤
+    theoretical_photonic_time = total_images * latency_per_sample_hybrid
+    theoretical_photonic_time_mvm_only = total_images * latency_per_sample_mvm_only
 
     validation = {
         "conv_max_abs_err": conv_max_abs_err,
@@ -236,10 +254,15 @@ def simulate_photonic_inference(model, dataloader, num_runs=None):
         "mvm_acc_vs_target": mvm_correct_vs_target / max(total_images, 1),
         "pytorch_acc_vs_target":
         pytorch_correct_vs_target / max(total_images, 1),
+        "latency_per_sample_mvm_only_ps": latency_per_sample_mvm_only * 1e12,
+        "latency_per_sample_hybrid_ps": latency_per_sample_hybrid * 1e12,
+        "theoretical_photonic_time_mvm_only": theoretical_photonic_time_mvm_only,
+        "timing_model": timing_model,
+        "wall_elapsed_all_checks": wall_elapsed,
         "checked_images": total_images,
     }
 
-    return theoretical_photonic_time, cpu_elapsed, total_images, validation
+    return theoretical_photonic_time, electronic_elapsed, total_images, validation
 
 
 # 运行对比
@@ -249,13 +272,17 @@ theo_time, cpu_time, count, val = simulate_photonic_inference(
 
 print(f"测试样本总数: {count}")
 print("-" * 50)
-print(f"【传统 PyTorch (CPU/GPU) 实际耗时】: {cpu_time:.4f} 秒")
+print(f"【传统 PyTorch (CPU/GPU) 实际耗时】: {cpu_time:.4f} 秒 (前向+与target对比)")
 print(f"  -> 吞吐量: {count / cpu_time:.2f} 图片/秒")
 print("-" * 50)
-print(f"【光子张量核心 (理论物理耗时)】: {theo_time:.9f} 秒")
+print(f"【光子张量核心 (理论物理耗时, 新口径)】: {theo_time:.9f} 秒")
 print(
     f"  -> 理论吞吐量: {count / theo_time:.2e} 图片/秒 (约 {count / theo_time / 1e9:.2f} Giga-IPS)"
 )
+print(f"  -> 其中 MVM-only 旧口径耗时: {val['theoretical_photonic_time_mvm_only']:.9f} 秒")
+print(
+    f"  -> 单样本延迟: MVM-only={val['latency_per_sample_mvm_only_ps']:.1f} ps, "
+    f"新口径(含后续电学)= {val['latency_per_sample_hybrid_ps']:.1f} ps")
 print("-" * 50)
 speedup = cpu_time / theo_time
 print(f"🚀 理论加速比：{speedup:.2e} 倍 ({speedup/1e6:.2f} 百万倍)")
