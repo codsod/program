@@ -66,7 +66,7 @@ test_loader = DataLoader(test_dataset, batch_size=1000,
                          shuffle=False)  # 大批次用于测试吞吐量
 
 # ==========================================
-# 3. 训练模型 (获取准确的权重作为"真值")
+# 3. 训练模型 (获取准确的权重作为"真值")2
 # ==========================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = PhotonicTensorCoreNet().to(device)
